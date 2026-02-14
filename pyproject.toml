@@ -1,0 +1,25 @@
+[project]
+name = "logalyzer"
+version = "0.1.0"
+description = "Apache Log Analyzer to find excessive requests and create various statistics"
+readme = "README.md"
+authors = [
+    { name = "Erik Körner", email = "koerner@saw-leipzig.de" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "apachelogs>=0.6.1",
+    "rich>=14.3.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[project.scripts]
+logalyzer = "logalyzer.cli:cli_main"
+
+[build-system]
+requires = ["uv_build>=0.10.2,<0.11.0"]
+build-backend = "uv_build"
