@@ -19,6 +19,7 @@ Extra data:
 import argparse
 import bisect
 import gzip
+import io
 import logging
 import os.path
 import sys
@@ -26,11 +27,11 @@ from abc import ABCMeta, abstractmethod
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from functools import lru_cache
+from functools import lru_cache, partial
 from ipaddress import IPv4Address, IPv4Network, summarize_address_range
 from pathlib import Path
 from pprint import pprint
-from typing import Any, Callable, Dict, List, Literal, TypedDict
+from typing import Callable, Dict, Generic, List, Literal, TypedDict, TypeVar, overload
 
 from apachelogs import LogParser, InvalidEntryError, LogEntry as ParsedLogEntry
 
@@ -104,7 +105,7 @@ class FileStats(TypedDict):
     noReferer: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class LogEntry:
     # %t
     time: str
@@ -151,11 +152,16 @@ class TokenBucket:
         #: timestamp (UNIX) from last refill
         self.last_refill: float = 0
 
-    def refill(self, at: float | datetime | None = None):
+    @staticmethod
+    def when(at: float | datetime | None = None):
         if at is None:
             at = datetime.now()
         if isinstance(at, datetime):
             at = at.timestamp()
+        return at
+
+    def refill(self, at: float | datetime | None = None):
+        at = self.when(at)
 
         # compute elapsed time between last refill and current (at) time
         elapsed = at - self.last_refill
@@ -171,6 +177,7 @@ class TokenBucket:
         at: float | datetime | None = None,
         raise_exc: bool = True,
     ):
+        at = self.when(at)
         self.refill(at=at)
 
         tokens_left = self.tokens - tokens
@@ -196,15 +203,111 @@ class TokenBucket:
         )
 
 
+@dataclass
+class ExceedStreakInformation:
+    # UNIX timestamps (convertable to `datetime`)
+    start: float
+    end: float | None = None
+    start_exceed: float | None = None
+    end_exceed: float | None = None
+    count: int = 0
+    count_exceed: int = 0
+
+    @property
+    def has_exceeded(self):
+        return self.count_exceed > 0
+
+    def update(self, when: float, exceeded: bool):
+        # update last known end of any information
+        self.end = when
+        # increment all
+        self.count += 1
+
+        if exceeded:
+            # if we do not yet have a start, set the start of exceeding
+            if self.start_exceed is None:
+                self.start_exceed = when
+            # last known timestamp of exceeding
+            self.end_exceed = when
+            # increment
+            self.count_exceed += 1
+
+    def __str__(self):
+        _ts = datetime.fromtimestamp
+        parts = [
+            f"{_ts(self.start)} -- {_ts(self.end)}",
+            f" [{self.count}x]",
+        ]
+        if self.start_exceed is not None:
+            parts.extend(
+                [
+                    f", exceeded: {_ts(self.start_exceed)} -- {_ts(self.end_exceed)}",
+                    f" [{self.count_exceed}x]",
+                ]
+            )
+        return "".join(parts)
+
+
+class TokenBucketWithStreakInfo(TokenBucket):
+    def __init__(self, capacity: float, refill_rate: float, last_refill: float = 0):
+        super().__init__(capacity, refill_rate, last_refill)
+        self.streak: ExceedStreakInformation | None = None
+
+    def refill(self, at: float | datetime | None = None):
+        # refill bucket
+        super().refill(at)
+
+        # check if bucket if full
+        bucket_full = self.tokens == self.capacity
+        # bucket is full, previous streak can be discarded, start (possible) new streak
+        if bucket_full:
+            # if self.streak is not None and self.streak.start_exceed is not None:
+            #     LOGGER.debug(f"Streak: {self.streak}")
+            at = self.when(at)
+            self.streak = ExceedStreakInformation(start=at)
+
+    def consume(
+        self,
+        tokens: float = 1,
+        at: float | datetime | None = None,
+        raise_exc: bool = True,
+    ):
+        at = self.when(at)
+        # True if tokens left, False if tokens exhausted/request limit exceeded
+        tokens_left = True
+        try:
+            tokens_left = super().consume(tokens, at=at, raise_exc=raise_exc)
+        except TokensExhausted as ex:
+            tokens_left = False
+            raise ex
+        finally:
+            # if first request
+            if self.streak is None:
+                self.streak = ExceedStreakInformation(start=at)
+
+            # update streak "end" times
+            self.streak.update(at, exceeded=not tokens_left)
+            # NOTE: excessive requests may reduce for a time and later increase again
+            # will all be in the same streak if token bucket has no change to fully recover
+
+        return tokens_left
+
+    def __repr__(self):
+        return (
+            self.__class__.__qualname__
+            + f"(capacity={self.capacity!r}, tokens={self.tokens!r}, refill_rate={self.refill_rate!r}, last_refill={self.last_refill!r}, streak={self.streak!r})"
+        )
+
+
 # --------------------------------------------------------------------------
 # ip / asn lookup
 
 
-@dataclass
+@dataclass(frozen=True)
 class IPv4ASNEntry:
     start: IPv4Address
     end: IPv4Address
-    number: str | int
+    number: int
     country_code: str
     description: str
     networks: List[IPv4Network] = field(default_factory=list)
@@ -235,7 +338,7 @@ class IPv4ASNLookup:
                 entry = IPv4ASNEntry(
                     start=ip_start,
                     end=ip_end,
-                    number=AS_number,
+                    number=int(AS_number),
                     country_code=country_code,
                     description=AS_description,
                     networks=ip_nets,
@@ -249,6 +352,9 @@ class IPv4ASNLookup:
         self.search_list.sort()  # TODO: `bisect` insert?
 
         LOGGER.debug(f"Read {lno+1} IPv4 ASNs entries.")
+        LOGGER.debug(
+            f"Generated {len(self.search_list)} IPv4 network address search entries."
+        )
 
     @lru_cache(maxsize=2**10)
     def find_net(self, ipaddress: str | IPv4Address) -> IPv4Network:
@@ -300,22 +406,27 @@ class IPv4ASNLookup:
 # --------------------------------------------------------------------------
 
 
+TK = TypeVar("TK")
+
+
 class LogEntryAnalyzer(metaclass=ABCMeta):
     @abstractmethod
     def process(self, log_entry: LogEntry): ...
 
     def onNewFile(self, file: Path): ...
 
+    def report(self, stream=None): ...
+
 
 @dataclass
 class ExhaustedEntry:
     count: int = 0
     times: List[datetime] = field(default_factory=list)
+    items: Counter = field(default_factory=Counter)
     recovered: bool = True
 
 
-# TODO: generic bucket_key type?
-class ExcessRequestsPerKeyAnalyzer(LogEntryAnalyzer, metaclass=ABCMeta):
+class ExcessRequestsPerKeyAnalyzer(Generic[TK], LogEntryAnalyzer, metaclass=ABCMeta):
     def __init__(
         self,
         token_capacity: float,
@@ -329,26 +440,76 @@ class ExcessRequestsPerKeyAnalyzer(LogEntryAnalyzer, metaclass=ABCMeta):
         self.token_refill_rate = token_refill_rate
         self.token_consuption = token_consuption
 
-        self.token_buckets: Dict[str, TokenBucket] = dict()
-        self.ipsExhausted: Dict[str, ExhaustedEntry] = dict()
+        self.token_buckets: Dict[TK, TokenBucket] = dict()
+        self.ipsExhausted: Dict[TK, ExhaustedEntry] = dict()
+        self.exceed_streak: Dict[TK, List[ExceedStreakInformation]] = dict()
 
         self.only_track_first_in_series = only_track_first_in_series
 
     @abstractmethod
-    def _bucket_key(self, log_entry: LogEntry) -> str: ...
+    def bucket_key(self, log_entry: LogEntry) -> TK: ...
+
+    @lru_cache
+    def _bucket_key(self, log_entry: LogEntry):
+        return self.bucket_key(log_entry)
+
+    def _bucket_factory(self):
+        factory_cls = TokenBucket
+        factory_cls = TokenBucketWithStreakInfo
+        token_bucket = factory_cls(
+            capacity=self.token_capacity,
+            refill_rate=self.token_refill_rate,
+        )
+        return token_bucket
 
     def _get_bucket(self, log_entry: LogEntry):
         key = self._bucket_key(log_entry)
         try:
             return self.token_buckets[key]
         except KeyError:
-            token_bucket = TokenBucket(
-                capacity=self.token_capacity,
-                refill_rate=self.token_refill_rate,
-            )
+            token_bucket = self._bucket_factory()
             self.token_buckets[key] = token_bucket
             return token_bucket
 
+    def _get_exceed_streak_info(self, log_entry: LogEntry):
+        key = self._bucket_key(log_entry)
+
+        streak_list = self.exceed_streak.get(key, None)
+        if streak_list is None:
+            streak_list = []
+            self.exceed_streak[key] = streak_list
+
+        return streak_list
+
+    def _update_exceed_streak(self, log_entry: LogEntry):
+        token_bucket = self._get_bucket(log_entry)
+        if not isinstance(token_bucket, TokenBucketWithStreakInfo):
+            return
+
+        streak = token_bucket.streak
+        if not streak.has_exceeded:
+            # only interested if exceeded, otherwise noise/default behaviour
+            return
+
+        streak_list = self._get_exceed_streak_info(log_entry)
+        if not streak_list:
+            # if new, then simply add
+            streak_list.append(streak)
+            return
+
+        # check if not already recorded
+        last_streak = streak_list[-1]
+        if last_streak.start != streak.start:
+            streak_list.append(streak)
+
+    @overload
+    def _get_exhaustion_state(
+        self, log_entry: LogEntry, create: Literal[True] = True
+    ) -> ExhaustedEntry: ...
+    @overload
+    def _get_exhaustion_state(
+        self, log_entry: LogEntry, create: Literal[False] = False
+    ) -> ExhaustedEntry | None: ...
     def _get_exhaustion_state(self, log_entry: LogEntry, create: bool = True):
         key = self._bucket_key(log_entry)
 
@@ -360,9 +521,12 @@ class ExcessRequestsPerKeyAnalyzer(LogEntryAnalyzer, metaclass=ABCMeta):
         return state
 
     def _add_exhaustion(self, log_entry: LogEntry):
+        key = self._bucket_key(log_entry)
         state = self._get_exhaustion_state(log_entry, create=True)
 
         state.count += 1
+        # customizable
+        self.update_exhaustion_info(log_entry, state, log_entry_key=key)
 
         if self.only_track_first_in_series:
             # if requests were ok, we now block since exceeded
@@ -380,6 +544,14 @@ class ExcessRequestsPerKeyAnalyzer(LogEntryAnalyzer, metaclass=ABCMeta):
         if state is not None:
             state.recovered = True
 
+    def update_exhaustion_info(
+        self,
+        log_entry: LogEntry,
+        exhaustion_entry: ExhaustedEntry,
+        log_entry_key: TK,
+    ):
+        exhaustion_entry.items[log_entry_key] += 1
+
     def process(self, log_entry: LogEntry):
         token_bucket = self._get_bucket(log_entry)
         ok = token_bucket.consume(
@@ -387,15 +559,141 @@ class ExcessRequestsPerKeyAnalyzer(LogEntryAnalyzer, metaclass=ABCMeta):
             at=log_entry.time,
             raise_exc=False,
         )
+
+        # update streak information
+        self._update_exceed_streak(log_entry)
+
+        # update exhaustion
         if not ok:
             self._add_exhaustion(log_entry)
         else:
             self._reset_exhaustion_for_ip(log_entry)
 
+    @abstractmethod
+    def report(self, stream=None): ...
 
-class ExcessRequestsPerIPv4Analyzer(ExcessRequestsPerKeyAnalyzer):
-    def _bucket_key(self, log_entry: LogEntry):
+
+class ExcessRequestsPerIPv4Analyzer(ExcessRequestsPerKeyAnalyzer[str]):
+    def bucket_key(self, log_entry: LogEntry):
         return str(log_entry.ipaddress)
+
+    def report(self, stream: io.TextIOBase | None = None):
+        sprint = partial(print, file=stream)
+        sprint("# Excessive IPv4 Requests")
+
+        dummy_tb = self._bucket_factory()
+        ratio = dummy_tb.refill_rate.as_integer_ratio()
+        sprint(
+            f"- rate limiting with TokenBucket"
+            f": capacity={dummy_tb.capacity!r}, refill_rate={dummy_tb.refill_rate!r}"
+            f" ({ratio[0]} req / {ratio[1]} sec)"
+        )
+
+        sprint()
+        sprint("## Request streaks per IP")
+        if not self.exceed_streak:
+            sprint("-> No limits exceeded!")
+            return
+
+        for ip, streaks in self.exceed_streak.items():
+            sprint(f"- {ip}")
+            for streak in streaks:
+                sprint(f"  - {streak!s}")
+            sprint(
+                f"  -> total requests = {sum(s.count for s in streaks)}"
+                f", after limit reached = {sum(s.count_exceed for s in streaks)}"
+            )
+
+
+class ExcessRequestsPerIPv4ASNAnalyzer(ExcessRequestsPerKeyAnalyzer[str]):
+    def __init__(
+        self,
+        asn_lookup: IPv4ASNLookup,
+        token_capacity: float,
+        token_refill_rate: float,
+        token_consuption: float = 1,
+        only_track_first_in_series: bool = True,
+    ):
+        super().__init__(
+            token_capacity,
+            token_refill_rate,
+            token_consuption,
+            only_track_first_in_series,
+        )
+        self.asn_lookup = asn_lookup
+        self.key2asn: Dict[str, IPv4ASNEntry] = dict()
+
+    def bucket_key(self, log_entry: LogEntry):
+        asn_info = self.asn_lookup.find_asn(log_entry.ipaddress)
+        key = f"{asn_info.start!s}--{asn_info.end!s}"
+
+        # store key to ASN for later
+        self.key2asn[key] = asn_info
+
+        return key
+
+    def report(self, stream: io.TextIOBase | None = None):
+        sprint = partial(print, file=stream)
+        sprint("# Excessive IPv4 ASN Requests")
+
+        dummy_tb = self._bucket_factory()
+        ratio = dummy_tb.refill_rate.as_integer_ratio()
+        sprint(
+            f"- rate limiting with TokenBucket"
+            f": capacity={dummy_tb.capacity!r}, refill_rate={dummy_tb.refill_rate!r}"
+            f" ({ratio[0]} req / {ratio[1]} sec)"
+        )
+
+        sprint()
+        sprint("## Request streaks per IP Range")
+        if not self.exceed_streak:
+            sprint("-> No limits exceeded!")
+            return
+
+        for key, streaks in self.exceed_streak.items():
+            asn_info = self.key2asn[key]
+            sprint(f"- {key} ASN={asn_info.number!r}")
+            sprint(f"  -> [{asn_info.country_code}] {asn_info.description}")
+            sprint(
+                f"  -> networks: {', '.join(map(str, (ipnet for ipnet in asn_info.networks)))}"
+            )
+            for streak in streaks:
+                sprint(f"  - {streak!s}")
+            sprint(
+                f"  -> total requests = {sum(s.count for s in streaks)}"
+                f", after limit reached = {sum(s.count_exceed for s in streaks)}"
+            )
+
+
+class ExcessRequestsPerIPv4ASNSingleNetAnalyzer(ExcessRequestsPerKeyAnalyzer[str]):
+    def __init__(
+        self,
+        asn_lookup: IPv4ASNLookup,
+        token_capacity: float,
+        token_refill_rate: float,
+        token_consuption: float = 1,
+        only_track_first_in_series: bool = True,
+    ):
+        super().__init__(
+            token_capacity,
+            token_refill_rate,
+            token_consuption,
+            only_track_first_in_series,
+        )
+        self.asn_lookup = asn_lookup
+        self.key2net: Dict[str, IPv4Network] = dict()
+
+    def bucket_key(self, log_entry: LogEntry):
+        ip_net = self.asn_lookup.find_net(log_entry.ipaddress)
+        key = f"{ip_net!s}"
+
+        # store key to ASN for later
+        self.key2asn[key] = ip_net
+
+        return key
+
+    def report(self, stream: io.TextIOBase | None = None):
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -553,7 +851,9 @@ def main(files: List[Path]):
 
     file2stats: Dict[str, FileStats] = dict()
     analyzers: List[LogEntryAnalyzer] = list()
-    analyzers.append(ExcessRequestsPerIPv4Analyzer(5, 1))
+    analyzers.append(ExcessRequestsPerIPv4Analyzer(5, 5 / 1))
+    analyzers.append(ExcessRequestsPerIPv4ASNAnalyzer(mapIPv4ASN, 10, 10 / 1))
+    # analyzers.append(ExcessRequestsPerIPv4ASNSingleNetAnalyzer(mapIPv4ASN, 10, 10/1))
 
     # process files
     for file in files:
@@ -564,12 +864,45 @@ def main(files: List[Path]):
 
         file2stats[str(file)] = stats
 
-    pprint(
-        {
-            ip: {"total": exh.count, "series": len(exh.times)}
-            for ip, exh in analyzers[0].ipsExhausted.items()
-        }
-    )
+    analyzers[0].report(stream=sys.stderr)
+    print("\n", file=sys.stderr)
+    analyzers[1].report(stream=sys.stderr)
+
+    # pprint(
+    #     {
+    #         ip: {"total": exh.count, "series": len(exh.times)}
+    #         for ip, exh in analyzers[0].ipsExhausted.items()
+    #     }
+    # )
+
+    # pprint(
+    #     {
+    #         ip: bucket.streak
+    #         for ip, bucket in analyzers[0].token_buckets.items()
+    #         if ip in analyzers[0].ipsExhausted
+    #     }
+    # )
+
+    # pprint(
+    #     {
+    #         ip: streaks
+    #         for ip, streaks in analyzers[0].exceed_streak.items()
+    #         if ip in analyzers[0].ipsExhausted
+    #     }
+    # )
+
+    # pprint(
+    #     {
+    #         asn: {"total": exh.count, "series": len(exh.times)}
+    #         for asn, exh in analyzers[1].ipsExhausted.items()
+    #     }
+    # )
+    # pprint(
+    #     {
+    #         net: {"total": exh.count, "series": len(exh.times)}
+    #         for net, exh in analyzers[2].ipsExhausted.items()
+    #     }
+    # )
 
 
 # --------------------------------------------------------------------------
