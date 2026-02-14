@@ -7,7 +7,13 @@ Analyzes Apache log files for excessive requests and create various usage statis
 `uv run` might install everything automatically?
 Otherwise try `uv sync`.
 
-## Run
+Prepare runtime data (IPv4 ASN lookup):
+
+```bash
+uv run scripts/download_ip2asn.py
+```
+
+## Run Analyses
 
 ```bash
 # show help
@@ -22,5 +28,6 @@ uv run logalyzer --debug -i 'data/access.log.2026-01-01.gz'
 
 ## Extra data
 
-- IPv4 ASN lookup:
+- IPv4 ASN lookup - https://iptoasn.com/:
   - https://iptoasn.com/data/ip2asn-v4.tsv.gz
+  - Run `uv run scripts/download_ip2asn.py` to download/update
