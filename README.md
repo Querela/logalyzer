@@ -4,14 +4,22 @@ Analyzes Apache log files for excessive requests and create various usage statis
 
 ## Installation
 
-`uv run` might install everything automatically?
-Otherwise try `uv sync`.
+Clone the repo from Github:
 
-Prepare runtime data (IPv4 ASN lookup):
+```bash
+git clone https://github.com/Querela/logalyzer.git
+cd logalyzer
+```
+
+The `uv` command should install everything automatically when trying to run the `logalyzer` but you can probably try `uv sync`, too.
+
+Before the first run, prepare runtime data (IPv4 ASN lookup):
 
 ```bash
 uv run scripts/download_ip2asn.py
 ```
+
+The command can also be run to update the data if a newer version is detected.
 
 ## Run Analyses
 
