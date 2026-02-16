@@ -7,7 +7,6 @@ from datetime import datetime
 from fractions import Fraction
 from functools import lru_cache, partial
 from ipaddress import IPv4Network
-from pathlib import Path
 from typing import Dict, Generic, List, Literal, TypeVar, overload
 
 
@@ -18,6 +17,7 @@ from logalyzer.ratelimit import (
     TokenBucketWithStreakInfo,
     ExceedStreaks,
 )
+from logalyzer.analyzers.base import LogEntryAnalyzer, Reportable
 
 
 # --------------------------------------------------------------------------
@@ -27,21 +27,6 @@ LOGGER = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 
 TK = TypeVar("TK")
-
-# --------------------------------------------------------------------------
-
-
-class LogEntryAnalyzer(metaclass=ABCMeta):
-    @abstractmethod
-    def process(self, log_entry: LogEntry): ...
-
-    def onNewFile(self, file: Path): ...
-
-
-class Reportable(metaclass=ABCMeta):
-    @abstractmethod
-    def report(self, /, stream: io.TextIOBase | None = None, **kwargs): ...
-
 
 # --------------------------------------------------------------------------
 

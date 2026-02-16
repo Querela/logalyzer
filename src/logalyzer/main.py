@@ -11,6 +11,10 @@ from logalyzer.analyzers import (
     ExcessRequestsPerIPv4Analyzer,
     ExcessRequestsPerIPv4ASNAnalyzer,
     ExcessRequestsPerIPv4ASNSingleNetAnalyzer,
+    IPASNCounterAnalyzer,
+    IPv4ASNSingleNetCounterAnalyzer,
+    IPCounterAnalyzer,
+    UserAgentCounterAnalyzer,
     Reportable,
 )
 from logalyzer.asn import IPv4ASNLookup
@@ -113,10 +117,14 @@ def main(files: List[Path], ip2asn_file: str | os.PathLike | Path, debug: bool =
     # NOTE: for second resolution, choose a token capacity slightly larger than the refill rate to combine streaks across the seconds boundary!
     # (if same, i.e. 5 tokens capacity with 5 tokens per seconds refill; otherwise each second all tokens will be refilled and excessive requests get lost!)
     analyzers.append(ExcessRequestsPerIPv4Analyzer(6, 5 / 1))
-    analyzers.append(ExcessRequestsPerIPv4Analyzer(5, 1 / 5))
-    analyzers.append(ExcessRequestsPerIPv4Analyzer(30, 25 / 5))
+    # analyzers.append(ExcessRequestsPerIPv4Analyzer(5, 1 / 5))
+    # analyzers.append(ExcessRequestsPerIPv4Analyzer(30, 25 / 5))
     analyzers.append(ExcessRequestsPerIPv4ASNAnalyzer(mapIPv4ASN, 11, 10 / 1))
-    analyzers.append(ExcessRequestsPerIPv4ASNSingleNetAnalyzer(mapIPv4ASN, 11, 10 / 1))
+    # analyzers.append(ExcessRequestsPerIPv4ASNSingleNetAnalyzer(mapIPv4ASN, 11, 10 / 1))
+    analyzers.append(IPCounterAnalyzer())
+    # analyzers.append(IPASNCounterAnalyzer(mapIPv4ASN))
+    analyzers.append(IPv4ASNSingleNetCounterAnalyzer(mapIPv4ASN))
+    # analyzers.append(UserAgentCounterAnalyzer())
 
     LOGGER.info(
         f"Start processing {len(files)} file{'s' if len(files)!= 1 else ''} ..."
