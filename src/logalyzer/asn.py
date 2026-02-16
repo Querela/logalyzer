@@ -17,14 +17,14 @@ LOGGER = logging.getLogger(__name__)
 # ip / asn lookup
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class IPv4ASNEntry:
     start: IPv4Address
     end: IPv4Address
     number: int
     country_code: str
     description: str
-    networks: List[IPv4Network] = field(default_factory=list)
+    networks: List[IPv4Network] = field(default_factory=list, hash=False, compare=False)
 
 
 class IPv4ASNLookup:

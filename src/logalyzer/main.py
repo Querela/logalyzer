@@ -11,6 +11,7 @@ from logalyzer.analyzers import (
     ExcessRequestsPerIPv4Analyzer,
     ExcessRequestsPerIPv4ASNAnalyzer,
     ExcessRequestsPerIPv4ASNSingleNetAnalyzer,
+    ExcessRequestsPerIPv4ASNNumberAnalyzer,
     IPASNCounterAnalyzer,
     IPv4ASNSingleNetCounterAnalyzer,
     IPCounterAnalyzer,
@@ -121,6 +122,7 @@ def main(files: List[Path], ip2asn_file: str | os.PathLike | Path, debug: bool =
     # analyzers.append(ExcessRequestsPerIPv4Analyzer(30, 25 / 5))
     analyzers.append(ExcessRequestsPerIPv4ASNAnalyzer(mapIPv4ASN, 11, 10 / 1))
     # analyzers.append(ExcessRequestsPerIPv4ASNSingleNetAnalyzer(mapIPv4ASN, 11, 10 / 1))
+    # analyzers.append(ExcessRequestsPerIPv4ASNNumberAnalyzer(mapIPv4ASN, 11, 10 / 1))
     analyzers.append(IPCounterAnalyzer())
     # analyzers.append(IPASNCounterAnalyzer(mapIPv4ASN))
     analyzers.append(IPv4ASNSingleNetCounterAnalyzer(mapIPv4ASN))

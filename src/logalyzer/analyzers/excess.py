@@ -7,7 +7,7 @@ from datetime import datetime
 from fractions import Fraction
 from functools import lru_cache, partial
 from ipaddress import IPv4Network
-from typing import Dict, Generic, List, Literal, TypeVar, overload
+from typing import Dict, Generic, List, Literal, Set, TypeVar, overload
 
 
 from logalyzer.asn import IPv4ASNLookup, IPv4ASNEntry
@@ -343,6 +343,74 @@ class ExcessRequestsPerIPv4ASNSingleNetAnalyzer(
                 f"- {ip_net} ({ip_net.network_address} -- {ip_net.broadcast_address})  ASN={asn_info.number!r}"
             )
             sprint(f"  -> [{asn_info.country_code}] {asn_info.description}")
+            for streak in streaks:
+                sprint(f"  - {streak.normal!s}")
+                for exceeded_streak in streak.exceeded:
+                    sprint(f"    - {exceeded_streak!s}")
+            sprint(
+                f"  -> total requests = {sum(s.count for s in streaks)}"
+                f", after limit reached = {sum(s.exceed_count for s in streaks)}"
+            )
+
+
+class ExcessRequestsPerIPv4ASNNumberAnalyzer(
+    Reportable, ExcessRequestsPerKeyAnalyzer[int]
+):
+    def __init__(
+        self,
+        asn_lookup: IPv4ASNLookup,
+        token_capacity: float,
+        token_refill_rate: float,
+        token_consuption: float = 1,
+        only_track_first_in_series: bool = True,
+    ):
+        super().__init__(
+            token_capacity,
+            token_refill_rate,
+            token_consuption,
+            only_track_first_in_series,
+        )
+        self.asn_lookup = asn_lookup
+        self.key2asn: Dict[int, IPv4ASNEntry] = dict()
+        self.key2asns: Dict[int, Set[IPv4ASNEntry]] = dict()
+
+    def bucket_key(self, log_entry: LogEntry):
+        asn_info = self.asn_lookup.find_asn(log_entry.ipaddress)
+        key = asn_info.number
+
+        # store key to ASN for later
+        self.key2asn[key] = asn_info
+
+        try:
+            self.key2asns[key].add(asn_info)
+        except KeyError:
+            self.key2asns[key] = {asn_info}
+
+        return key
+
+    def report(self, /, stream: io.TextIOBase | None = None, **kwargs):
+        sprint = partial(print, file=stream)
+        sprint("# Excessive IPv4 AS Number Requests")
+
+        ratio = Fraction(str(self.token_refill_rate)).as_integer_ratio()
+        sprint(
+            f"- rate limiting with TokenBucket"
+            f": capacity={self.token_capacity!r}, refill_rate={self.token_refill_rate!r}"
+            f" ({ratio[0]} req / {ratio[1]} sec)"
+        )
+
+        sprint()
+        sprint("## Request streaks per AS Number")
+        if not self.exceed_streak:
+            sprint("-> No limits exceeded!")
+            return
+
+        for key, streaks in self.exceed_streak.items():
+            asn_info = self.key2asn[key]
+            sprint(
+                f"- ASN={asn_info.number!r}  [{asn_info.country_code}] {asn_info.description}"
+            )
+            # sprint(f"  -> networks: {', '.join(str(ipnet) for asn_info in sorted(self.key2asns[key]) for ipnet in asn_info.networks)}")
             for streak in streaks:
                 sprint(f"  - {streak.normal!s}")
                 for exceeded_streak in streak.exceeded:

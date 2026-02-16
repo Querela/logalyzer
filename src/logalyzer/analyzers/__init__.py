@@ -9,6 +9,7 @@ from logalyzer.analyzers.excess import (
     ExcessRequestsPerIPv4Analyzer,
     ExcessRequestsPerIPv4ASNAnalyzer,
     ExcessRequestsPerIPv4ASNSingleNetAnalyzer,
+    ExcessRequestsPerIPv4ASNNumberAnalyzer,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "ExcessRequestsPerIPv4Analyzer",
     "ExcessRequestsPerIPv4ASNAnalyzer",
     "ExcessRequestsPerIPv4ASNSingleNetAnalyzer",
+    "ExcessRequestsPerIPv4ASNNumberAnalyzer",
 ]

@@ -199,8 +199,19 @@ class ExceedStreaks:
 
 
 class TokenBucketWithStreakInfo(TokenBucket):
-    def __init__(self, capacity: float, refill_rate: float, last_refill: float = 0):
-        super().__init__(capacity, refill_rate, last_refill)
+    def __init__(
+        self,
+        capacity: float,
+        refill_rate: float,
+        last_refill: float = 0.0,
+        overdraw_recover: bool = True,
+    ):
+        super().__init__(
+            capacity=capacity,
+            refill_rate=refill_rate,
+            last_refill=last_refill,
+            overdraw_recover=overdraw_recover,
+        )
         self.streak: ExceedStreaks | None = None
 
     def refill(self, at: float | datetime | None = None):

@@ -4,7 +4,7 @@ from abc import ABCMeta, abstractmethod
 from collections import Counter
 from functools import partial
 from ipaddress import IPv4Network
-from typing import Dict, Generic, List, Set, TypeVar
+from typing import Callable, Dict, Generic, List, Set, TypeVar
 
 
 from logalyzer.asn import IPv4ASNLookup, IPv4ASNEntry
@@ -70,6 +70,41 @@ class IPCounterAnalyzer(Reportable, CounterPerKeyAnalyzer[str]):
             sprint(f"- [{cnt:>{padlen}d}]  {ip}")
 
 
+def _groupby_asn(
+    counter: Counter[str],
+    fn_key2asn: Callable[[str], IPv4ASNEntry],
+    topn: int | None = 100,
+    min_count: int | None = 3,
+):
+    mapASNkey2keys: Dict[str, List[str]] = dict()
+    mapASNkey2ASNs: Dict[str, IPv4ASNEntry] = dict()
+    cntASNkey: Counter[str] = Counter()
+    validKeys: Set[str] = set()
+
+    # group by asn_key (ASN description)
+    for idx, (key, cnt) in enumerate(counter.most_common(), 1):
+        do_not_output = False
+        if topn is not None and idx > topn:
+            do_not_output = True
+        if cnt is not None and cnt < min_count:
+            do_not_output = True
+
+        asn_info = fn_key2asn(key)
+        asn_key = f"{asn_info.number}|{asn_info.country_code}|{asn_info.description}"
+
+        if not do_not_output:
+            validKeys.add(key)
+
+        cntASNkey[asn_key] += cnt
+        mapASNkey2ASNs[asn_key] = asn_info
+        try:
+            mapASNkey2keys[asn_key].append(key)
+        except KeyError:
+            mapASNkey2keys[asn_key] = [key]
+
+    return (mapASNkey2keys, mapASNkey2ASNs, cntASNkey, validKeys)
+
+
 class IPASNCounterAnalyzer(Reportable, CounterPerKeyAnalyzer[str]):
     def __init__(self, asn_lookup: IPv4ASNLookup):
         super().__init__()
@@ -107,33 +142,13 @@ class IPASNCounterAnalyzer(Reportable, CounterPerKeyAnalyzer[str]):
 
         if groupby_asn:
 
-            mapASNkey2keys: Dict[str, List[str]] = dict()
-            mapASNkey2ASNs: Dict[str, IPv4ASNEntry] = dict()
-            cntASNkey: Counter[str] = Counter()
-            validKeys: Set[str] = set()
+            def key2asn(key: str):
+                return self.key2asn[key]
 
-            # group by asn_key (ASN description)
-            for idx, (key, cnt) in enumerate(self.counter.most_common(), 1):
-                do_not_output = False
-                if topn is not None and idx > topn:
-                    do_not_output = True
-                if cnt is not None and cnt < min_count:
-                    do_not_output = True
-
-                asn_info = self.key2asn[key]
-                asn_key = (
-                    f"{asn_info.number}|{asn_info.country_code}|{asn_info.description}"
-                )
-
-                if not do_not_output:
-                    validKeys.add(key)
-
-                cntASNkey[asn_key] += cnt
-                mapASNkey2ASNs[asn_key] = asn_info
-                try:
-                    mapASNkey2keys[asn_key].append(key)
-                except KeyError:
-                    mapASNkey2keys[asn_key] = [key]
+            # group by asn_key
+            mapASNkey2keys, mapASNkey2ASNs, cntASNkey, validKeys = _groupby_asn(
+                self.counter, key2asn, topn=topn, min_count=min_count
+            )
 
             padlenKeys = max(1, len(str(max(map(len, mapASNkey2keys.values())))))
 
@@ -214,37 +229,14 @@ class IPv4ASNSingleNetCounterAnalyzer(Reportable, CounterPerKeyAnalyzer[str]):
 
         if groupby_asn:
 
-            mapASNkey2keys: Dict[str, List[str]] = dict()
-            mapASNkey2ASNs: Dict[str, IPv4ASNEntry] = dict()
-            cntASNkey: Counter[str] = Counter()
-            validKeys: Set[str] = set()
-
-            # group by asn_key (ASN description)
-            for idx, (key, cnt) in enumerate(self.counter.most_common(), 1):
-                do_not_output = False
-                if topn is not None and idx > topn:
-                    do_not_output = True
-                if cnt is not None and cnt < min_count:
-                    do_not_output = True
-
-                if cnt is not None and cnt < min_count:
-                    continue
-
+            def key2asn(key: str):
                 ip_net = self.key2net[key]
-                asn_info = self.asn_lookup.find_asn(ip_net.network_address)
-                asn_key = (
-                    f"{asn_info.number}|{asn_info.country_code}|{asn_info.description}"
-                )
+                return self.asn_lookup.find_asn(ip_net.network_address)
 
-                if not do_not_output:
-                    validKeys.add(key)
-
-                cntASNkey[asn_key] += cnt
-                mapASNkey2ASNs[asn_key] = asn_info
-                try:
-                    mapASNkey2keys[asn_key].append(key)
-                except KeyError:
-                    mapASNkey2keys[asn_key] = [key]
+            # group by asn_key
+            mapASNkey2keys, mapASNkey2ASNs, cntASNkey, validKeys = _groupby_asn(
+                self.counter, key2asn, topn=topn, min_count=min_count
+            )
 
             padlenKeys = max(1, len(str(max(map(len, mapASNkey2keys.values())))))
 
@@ -315,5 +307,10 @@ class UserAgentCounterAnalyzer(Reportable, CounterPerKeyAnalyzer[str | None]):
                 continue
             sprint(f"- [{cnt:>{padlen}d}]  {user_agent!r}")
 
+
+# --------------------------------------------------------------------------
+
+# TODO: group by input file ("date") using onNewFile
+# - composite key with filename
 
 # --------------------------------------------------------------------------
