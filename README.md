@@ -39,3 +39,11 @@ uv run logalyzer --debug -i 'data/access.log.2026-01-01.gz'
 - IPv4 ASN lookup - https://iptoasn.com/:
   - https://iptoasn.com/data/ip2asn-v4.tsv.gz
   - Run `uv run scripts/download_ip2asn.py` to download/update
+
+## Development
+
+### Profiling
+
+```
+uv run pyinstrument logalyzer -i 'data/access.log'
+```
