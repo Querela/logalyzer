@@ -1,19 +1,10 @@
-import argparse
-import bisect
-import gzip
-import io
 import logging
-import os.path
-import sys
-from abc import ABCMeta, abstractmethod
-from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from functools import lru_cache, partial
-from ipaddress import IPv4Address, IPv4Network, summarize_address_range
+from ipaddress import IPv4Address
 from pathlib import Path
-from pprint import pprint
-from typing import Callable, Dict, Generic, List, Literal, TypedDict, TypeVar, overload
+from queue import PriorityQueue
+from typing import Callable, Generator, List, Literal, overload
 
 from apachelogs import LogParser, InvalidEntryError, LogEntry as ParsedLogEntry
 
@@ -35,7 +26,7 @@ LOG_FORMAT = '%h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-Agent}i"'
 @dataclass(frozen=True)
 class LogEntry:
     # %t
-    time: str
+    time: datetime
     # %h
     ipaddress: IPv4Address
     # %>s
@@ -43,7 +34,7 @@ class LogEntry:
     # "%{Referer}i"
     referer: str | None
     # "%{User-Agent}i"
-    user_agent: str
+    user_agent: str | None
 
     line_nr: int = -1
     fpos: int = -1
@@ -75,7 +66,6 @@ def create_log_parser(logformat: str = LOG_FORMAT):
 
 
 # --------------------------------------------------------------------------
-
 
 
 def filter_valid_logfiles(
@@ -159,6 +149,122 @@ def sort_logfiles(
     # sort by filetime
     # sort by first log line timestamp
     return sorted(files, key=fn_key)
+
+
+# --------------------------------------------------------------------------
+
+# to work with out-of-order entries, buffer and sort entries before we process them
+# see: https://stackoverflow.com/a/1032022/9360161
+
+
+@dataclass(frozen=True, eq=False)
+class PriorityQueueItem:
+    time: float
+    entry: LogEntry
+
+    # compare methods as done in dataclasses module
+    # we only want to compare the time field
+
+    def __eq__(self, other):
+        if other.__class__ is self.__class__:
+            return self.time == other.time
+        return NotImplemented
+
+    def __lt__(self, other):
+        if other.__class__ is self.__class__:
+            return self.time < other.time
+        return NotImplemented
+
+    def __gt__(self, other):
+        if other.__class__ is self.__class__:
+            return self.time > other.time
+        return NotImplemented
+
+    def __le__(self, other):
+        if other.__class__ is self.__class__:
+            return self.time <= other.time
+        return NotImplemented
+
+    def __ge__(self, other):
+        if other.__class__ is self.__class__:
+            return self.time >= other.time
+        return NotImplemented
+
+
+@overload
+def parse_logs_ordered(
+    file: Path,
+    parser: LogParser | None = None,
+    buffer_size: int = 100,
+    yield_errors_as_None: Literal[False] = False,
+) -> Generator[LogEntry, None, None]: ...
+@overload
+def parse_logs_ordered(
+    file: Path,
+    parser: LogParser | None = None,
+    buffer_size: int = 100,
+    yield_errors_as_None: Literal[True] = True,
+) -> Generator[LogEntry | None, None, None]: ...
+
+
+def parse_logs_ordered(
+    file: Path,
+    parser: LogParser | None = None,
+    buffer_size: int = 100,
+    yield_errors_as_None: bool = True,
+) -> Generator[LogEntry | None, None, None]:
+    if parser is None:
+        parser = create_log_parser()
+
+    # buffer and sort entries by datetime (UNIX timestamp)
+    pq = PriorityQueue()
+    do_buffer = buffer_size > 0
+
+    with anyopen(file, "rt") as fp:
+        # can we determine the current file pointer position
+        can_tell = True
+        try:
+            fpos = fp.tell()
+        except OSError:
+            fpos = -1
+            can_tell = False
+
+        for lno, line in enumerate(fp, 1):
+            try:
+                entry_raw = parser.parse(line)
+                entry = LogEntry.fromApacheLogEntry(entry_raw, line_nr=lno, fpos=fpos)
+                if do_buffer:
+                    pq.put(PriorityQueueItem(time=entry.time.timestamp(), entry=entry))
+                else:
+                    yield entry
+
+            except InvalidEntryError:
+                # NOTE ignore invalid lines (may happen due to aborted/concurrent writes?)
+                # immediately return this error value
+                if yield_errors_as_None:
+                    yield None
+
+            finally:
+                if can_tell:
+                    # can we determine the current file pointer position
+                    # check again, may fail later (gzip, after first read)
+                    try:
+                        fpos = fp.tell()
+                    except OSError:
+                        fpos = -1
+                        can_tell = False
+
+                # drain one if buffer full
+                if do_buffer:
+                    if not pq.empty() and pq.qsize() >= buffer_size:
+                        item = pq.get()
+                        yield item.entry
+
+    # drain rest
+    if do_buffer:
+        while not pq.empty():
+            item = pq.get()
+            yield item.entry
 
 
 # --------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from abc import ABCMeta, abstractmethod
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
+from fractions import Fraction
 from functools import lru_cache, partial
 from ipaddress import IPv4Network
 from pathlib import Path
@@ -15,7 +16,7 @@ from logalyzer.logs import LogEntry
 from logalyzer.ratelimit import (
     TokenBucket,
     TokenBucketWithStreakInfo,
-    ExceedStreakInformation,
+    ExceedStreaks,
 )
 
 
@@ -63,13 +64,21 @@ class ExcessRequestsPerKeyAnalyzer(Generic[TK], LogEntryAnalyzer, metaclass=ABCM
     ):
         super().__init__()
 
+        if token_capacity <= token_refill_rate:
+            # TODO: or use the warnings.warn() mechanism?
+            LOGGER.warning(
+                f"Please choose a slightly larger {token_capacity=} than the {token_refill_rate=}"
+                " if your log entry time resolution is in seconds! Otherwise excessive requests"
+                " may not be detectable. Each second will essentially reset the detection..."
+            )
+
         self.token_capacity = token_capacity
         self.token_refill_rate = token_refill_rate
         self.token_consuption = token_consuption
 
         self.token_buckets: Dict[TK, TokenBucket] = dict()
         self.ipsExhausted: Dict[TK, ExhaustedEntry] = dict()
-        self.exceed_streak: Dict[TK, List[ExceedStreakInformation]] = dict()
+        self.exceed_streak: Dict[TK, List[ExceedStreaks]] = dict()
 
         self.only_track_first_in_series = only_track_first_in_series
 
@@ -98,7 +107,7 @@ class ExcessRequestsPerKeyAnalyzer(Generic[TK], LogEntryAnalyzer, metaclass=ABCM
             self.token_buckets[key] = token_bucket
             return token_bucket
 
-    def _get_exceed_streak_info(self, log_entry: LogEntry):
+    def _get_exceed_streak_list(self, log_entry: LogEntry):
         key = self._bucket_key(log_entry)
 
         streak_list = self.exceed_streak.get(key, None)
@@ -118,15 +127,17 @@ class ExcessRequestsPerKeyAnalyzer(Generic[TK], LogEntryAnalyzer, metaclass=ABCM
             # only interested if exceeded, otherwise noise/default behaviour
             return
 
-        streak_list = self._get_exceed_streak_info(log_entry)
+        streak_list = self._get_exceed_streak_list(log_entry)
         if not streak_list:
             # if new, then simply add
             streak_list.append(streak)
+            # LOGGER.debug(f"Record first Streak: {streak!s}")
             return
 
         # check if not already recorded
         last_streak = streak_list[-1]
         if last_streak.start != streak.start:
+            # LOGGER.debug(f"Record new Streak: {streak!s} dates: {last_streak.start}, {streak.start}")
             streak_list.append(streak)
 
     @overload
@@ -208,11 +219,10 @@ class ExcessRequestsPerIPv4Analyzer(Reportable, ExcessRequestsPerKeyAnalyzer[str
         sprint = partial(print, file=stream)
         sprint("# Excessive IPv4 Requests")
 
-        dummy_tb = self._bucket_factory()
-        ratio = dummy_tb.refill_rate.as_integer_ratio()
+        ratio = Fraction(str(self.token_refill_rate)).as_integer_ratio()
         sprint(
             f"- rate limiting with TokenBucket"
-            f": capacity={dummy_tb.capacity!r}, refill_rate={dummy_tb.refill_rate!r}"
+            f": capacity={self.token_capacity!r}, refill_rate={self.token_refill_rate!r}"
             f" ({ratio[0]} req / {ratio[1]} sec)"
         )
 
@@ -225,10 +235,12 @@ class ExcessRequestsPerIPv4Analyzer(Reportable, ExcessRequestsPerKeyAnalyzer[str
         for ip, streaks in self.exceed_streak.items():
             sprint(f"- {ip}")
             for streak in streaks:
-                sprint(f"  - {streak!s}")
+                sprint(f"  - {streak.normal!s}")
+                for exceeded_streak in streak.exceeded:
+                    sprint(f"    - {exceeded_streak!s}")
             sprint(
                 f"  -> total requests = {sum(s.count for s in streaks)}"
-                f", after limit reached = {sum(s.count_exceed for s in streaks)}"
+                f", after limit reached = {sum(s.exceed_count for s in streaks)}"
             )
 
 
@@ -263,11 +275,10 @@ class ExcessRequestsPerIPv4ASNAnalyzer(Reportable, ExcessRequestsPerKeyAnalyzer[
         sprint = partial(print, file=stream)
         sprint("# Excessive IPv4 ASN Requests")
 
-        dummy_tb = self._bucket_factory()
-        ratio = dummy_tb.refill_rate.as_integer_ratio()
+        ratio = Fraction(str(self.token_refill_rate)).as_integer_ratio()
         sprint(
             f"- rate limiting with TokenBucket"
-            f": capacity={dummy_tb.capacity!r}, refill_rate={dummy_tb.refill_rate!r}"
+            f": capacity={self.token_capacity!r}, refill_rate={self.token_refill_rate!r}"
             f" ({ratio[0]} req / {ratio[1]} sec)"
         )
 
@@ -285,10 +296,12 @@ class ExcessRequestsPerIPv4ASNAnalyzer(Reportable, ExcessRequestsPerKeyAnalyzer[
                 f"  -> networks: {', '.join(map(str, (ipnet for ipnet in asn_info.networks)))}"
             )
             for streak in streaks:
-                sprint(f"  - {streak!s}")
+                sprint(f"  - {streak.normal!s}")
+                for exceeded_streak in streak.exceeded:
+                    sprint(f"    - {exceeded_streak!s}")
             sprint(
                 f"  -> total requests = {sum(s.count for s in streaks)}"
-                f", after limit reached = {sum(s.count_exceed for s in streaks)}"
+                f", after limit reached = {sum(s.exceed_count for s in streaks)}"
             )
 
 
@@ -317,12 +330,42 @@ class ExcessRequestsPerIPv4ASNSingleNetAnalyzer(
         key = f"{ip_net!s}"
 
         # store key to ASN for later
-        self.key2asn[key] = ip_net
+        self.key2net[key] = ip_net
 
         return key
 
     def report(self, /, stream: io.TextIOBase | None = None, **kwargs):
-        pass
+        sprint = partial(print, file=stream)
+        sprint("# Excessive IPv4 ASN Requests for a single Network Range")
+
+        ratio = Fraction(str(self.token_refill_rate)).as_integer_ratio()
+        sprint(
+            f"- rate limiting with TokenBucket"
+            f": capacity={self.token_capacity!r}, refill_rate={self.token_refill_rate!r}"
+            f" ({ratio[0]} req / {ratio[1]} sec)"
+        )
+
+        sprint()
+        sprint("## Request streaks per IP Network")
+        if not self.exceed_streak:
+            sprint("-> No limits exceeded!")
+            return
+
+        for key, streaks in self.exceed_streak.items():
+            ip_net = self.key2net[key]
+            asn_info = self.asn_lookup.find_asn(ip_net.network_address)
+            sprint(
+                f"- {ip_net} ({ip_net.network_address} -- {ip_net.broadcast_address})  ASN={asn_info.number!r}"
+            )
+            sprint(f"  -> [{asn_info.country_code}] {asn_info.description}")
+            for streak in streaks:
+                sprint(f"  - {streak.normal!s}")
+                for exceeded_streak in streak.exceeded:
+                    sprint(f"    - {exceeded_streak!s}")
+            sprint(
+                f"  -> total requests = {sum(s.count for s in streaks)}"
+                f", after limit reached = {sum(s.exceed_count for s in streaks)}"
+            )
 
 
 # --------------------------------------------------------------------------

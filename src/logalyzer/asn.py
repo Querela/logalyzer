@@ -14,14 +14,6 @@ from logalyzer.utils import anyopen
 LOGGER = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
-
-base = os.path.dirname(__file__)
-relbase = os.getcwd()
-
-DN_BASE = os.path.relpath(os.path.join(base, "../.."), relbase)
-FN_IPv4ASN_MAP = os.path.join(DN_BASE, "ip2asn-v4.tsv")
-
-# --------------------------------------------------------------------------
 # ip / asn lookup
 
 
@@ -42,6 +34,9 @@ class IPv4ASNLookup:
 
     def load(self, tsv_file: str | os.PathLike | Path):
         LOGGER.debug(f"Loading IPv4 ASNs from '{tsv_file}'")
+
+        if not os.path.exists(tsv_file):
+            raise FileNotFoundError(f"IPv4 ASN mapping file not found: '{tsv_file}'")
 
         with anyopen(tsv_file, "rt") as fp:
             for lno, line in enumerate(fp):

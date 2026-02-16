@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -12,16 +13,15 @@ from logalyzer.analyzers import (
     ExcessRequestsPerIPv4ASNSingleNetAnalyzer,
     Reportable,
 )
-from logalyzer.asn import FN_IPv4ASN_MAP, IPv4ASNLookup
+from logalyzer.asn import IPv4ASNLookup
 from logalyzer.logs import (
-    LogEntry,
     create_log_parser,
     filter_valid_logfiles,
+    parse_logs_ordered,
     sort_logfiles,
 )
-from logalyzer.utils import anyopen
 
-from apachelogs import LogParser, InvalidEntryError
+from apachelogs import LogParser
 
 # --------------------------------------------------------------------------
 
@@ -54,49 +54,29 @@ def process_file(
 
     cntIPs = Counter()
     cntHasReferer = Counter()
+    num_errors = 0
 
-    with anyopen(file, "rt") as fp:
-        num_errors = 0
+    logs_iter = parse_logs_ordered(file, parser=parser, yield_errors_as_None=True)
+    for idx, entry in enumerate(logs_iter, 1):
+        if entry is None:
+            num_errors += 1
+            continue
 
-        can_tell = True
-        try:
+        ip = str(entry.ipaddress)
+        has_referer = entry.has_referer
 
-            fpos = fp.tell()
-        except OSError:
-            fpos = -1
-            can_tell = False
+        cntIPs[ip] += 1
+        cntHasReferer[has_referer] += 1
 
-        for lno, line in enumerate(fp, 1):
-            try:
-                entry_raw = parser.parse(line)
-                entry = LogEntry.fromApacheLogEntry(entry_raw, line_nr=lno, fpos=fpos)
-            except InvalidEntryError:
-                # ignore invalid lines (may happen?)
-                num_errors += 1
-                continue
-            finally:
-                if can_tell:
-                    try:
-                        fpos = fp.tell()
-                    except OSError:
-                        fpos = -1
-                        can_tell = False
+        # possible filters
+        if skip_with_referer and has_referer:
+            continue
 
-            ip = str(entry.ipaddress)
-            has_referer = entry.has_referer
+        # actual analysis
+        for analyzer in analyzers:
+            analyzer.process(entry)
 
-            cntIPs[ip] += 1
-            cntHasReferer[has_referer] += 1
-
-            # possible filters
-            if skip_with_referer and has_referer:
-                continue
-
-            # actual analysis
-            for analyzer in analyzers:
-                analyzer.process(entry)
-
-        num_lines = lno
+    num_lines = idx
 
     stats: FileStats = {
         "lines": num_lines,
@@ -111,12 +91,12 @@ def process_file(
 # --------------------------------------------------------------------------
 
 
-def main(files: List[Path], debug: bool = False):
+def main(files: List[Path], ip2asn_file: str | os.PathLike | Path, debug: bool = False):
     parser = create_log_parser()
 
     LOGGER.info(f"Load prerequisite data (IPv4 ASN mapping) ...")
     mapIPv4ASN = IPv4ASNLookup()
-    mapIPv4ASN.load(FN_IPv4ASN_MAP)
+    mapIPv4ASN.load(ip2asn_file)
 
     # check input files to be apache log file parsable
     valid_files = filter_valid_logfiles(files)
@@ -130,9 +110,13 @@ def main(files: List[Path], debug: bool = False):
 
     file2stats: Dict[str, FileStats] = dict()
     analyzers: List[LogEntryAnalyzer] = list()
-    analyzers.append(ExcessRequestsPerIPv4Analyzer(5, 5 / 1))
-    analyzers.append(ExcessRequestsPerIPv4ASNAnalyzer(mapIPv4ASN, 10, 10 / 1))
-    # analyzers.append(ExcessRequestsPerIPv4ASNSingleNetAnalyzer(mapIPv4ASN, 10, 10/1))
+    # NOTE: for second resolution, choose a token capacity slightly larger than the refill rate to combine streaks across the seconds boundary!
+    # (if same, i.e. 5 tokens capacity with 5 tokens per seconds refill; otherwise each second all tokens will be refilled and excessive requests get lost!)
+    analyzers.append(ExcessRequestsPerIPv4Analyzer(6, 5 / 1))
+    analyzers.append(ExcessRequestsPerIPv4Analyzer(5, 1 / 5))
+    analyzers.append(ExcessRequestsPerIPv4Analyzer(30, 25 / 5))
+    analyzers.append(ExcessRequestsPerIPv4ASNAnalyzer(mapIPv4ASN, 11, 10 / 1))
+    analyzers.append(ExcessRequestsPerIPv4ASNSingleNetAnalyzer(mapIPv4ASN, 11, 10 / 1))
 
     LOGGER.info(
         f"Start processing {len(files)} file{'s' if len(files)!= 1 else ''} ..."

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from pprint import pprint
 
+from logalyzer.env import FN_IPv4ASN_MAP
 from logalyzer.utils import setup_logging
 
 # --------------------------------------------------------------------------
@@ -79,6 +80,14 @@ def parse_args(args=None):
         ),
     )
 
+    # ipv4 asn mapping
+    parser.add_argument(
+        "--asn-map",
+        type=Path,
+        default=Path(FN_IPv4ASN_MAP),
+        help="TSV file with mapping of IPv4 to ASN",
+    )
+
     args = parser.parse_args(args)
 
     return args
@@ -97,7 +106,7 @@ def cli_main(args=None):
 
     from logalyzer.main import main
 
-    main(files=args.files, debug=args.debug)
+    main(files=args.files, ip2asn_file=args.asn_map, debug=args.debug)
 
     return 0
 
